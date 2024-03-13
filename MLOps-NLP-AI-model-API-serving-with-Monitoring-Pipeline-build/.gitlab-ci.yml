@@ -1,0 +1,46 @@
+default:
+  image: docker:20.10.16
+  services:
+  - docker:20.10.16-dind
+  tags:
+  - saas-linux-large-amd64
+stages:          # List of stages for jobs, and their order of execution
+  - build
+  - deploy
+
+build-job:       # This job runs in the build stage, which runs first.
+  stage: build
+  before_script:
+    - echo $GCP_KEY | cat > ./key.json
+    - cat ./key.json | docker login -u _json_key --password-stdin asia-northeast3-docker.pkg.dev
+  script:
+    - echo "dockerizing..."
+    - docker build . -t asia-northeast3-docker.pkg.dev/mlops-project-416811/docker/mlops-app
+    - echo "registry push..."
+    - docker push asia-northeast3-docker.pkg.dev/mlops-project-416811/docker/mlops-app 
+
+deploy-job:      # This job runs in the deploy stage.
+  stage: deploy  # It only runs when *both* jobs in the test stage complete successfully.
+  # environment: production
+  before_script:
+    - apk add curl
+    - curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+    - install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+    - rm argocd-linux-amd64
+    - argocd login $ARGOCD_IP --username $ARGOCD_ID --password $ARGOCD_PW --insecure
+
+  script:
+    - echo "Deploying..."
+    - >
+     argocd app create $CI_PROJECT_NAME 
+     --repo asia-northeast3-docker.pkg.dev
+     --helm-chart mlops-project-416811/helm/mlops-helm
+     --helm-set image.name=asia-northeast3-docker.pkg.dev/mlops-project-416811/docker/mlops-app
+     --revision 0.0.3
+     --dest-server https://kubernetes.default.svc
+     --dest-namespace api
+     --upsert
+    - argocd app get $CI_PROJECT_NAME --hard-refresh
+    - argocd app sync $CI_PROJECT_NAME
+    - argocd app actions run $CI_PROJECT_NAME restart --kind Deployment
+
